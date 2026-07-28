@@ -5,9 +5,9 @@ Spin a 3D model in your terminal. One file, no dependencies.
 > Turning and turning in the widening gyre…
 
 ```sh
-gyre model.obj              # inline pixels if your terminal supports them
-gyre model.fbx --blocks     # half-blocks, truecolour, transparent background
-gyre model.stl --ascii      # character ramp, 256-colour
+gyre models/spot.obj              # inline pixels if your terminal supports them
+gyre models/spot.obj --blocks     # half-blocks, truecolour, transparent background
+gyre models/spot.obj --ascii      # character ramp, 256-colour
 ```
 
 Loads `.obj`, `.stl` (binary + ASCII) and binary `.fbx`, then software-renders
@@ -23,10 +23,14 @@ curl -o ~/.local/bin/gyre https://raw.githubusercontent.com/mattpolicastro/gyre/
 chmod +x ~/.local/bin/gyre
 ```
 
-Bring your own model — try the [Utah teapot][teapot], or export anything from
-Blender.
+A model is bundled so there's something to spin immediately: **Spot**, by
+[Keenan Crane][spot], released into the public domain. See
+[`models/NOTICE.md`](models/NOTICE.md). Otherwise bring your own — anything
+Blender exports will do.
 
-[teapot]: https://graphics.stanford.edu/courses/cs148-10-summer/as3/code/as3/teapot.obj
+There's also `--demo torus` and `--demo cube`, which need no file at all.
+
+[spot]: https://www.cs.cmu.edu/~kmcrane/Projects/ModelRepository/
 
 ## Output modes
 
