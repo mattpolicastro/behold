@@ -14,7 +14,7 @@ triangles.
 
 [cc0]: https://creativecommons.org/publicdomain/zero/1.0/
 
-Included so `gyre` has something to render out of the box. Nothing else in this
+Included so `behold` has something to render out of the box. Nothing else in this
 repository depends on it — delete it and everything still works.
 
 ### Why not the Utah teapot?

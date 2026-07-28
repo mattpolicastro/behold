@@ -1,15 +1,15 @@
-# gyre
+# behold
 
 Spin a 3D model in your terminal. One file, no dependencies.
 
-> Turning and turning in the widening gyre…
+> `behold spot.obj`
 
-![Spot spinning in gyre's character mode](docs/spot-ascii.gif)
+![Spot spinning in behold's character mode](docs/spot-ascii.gif)
 
 ```sh
-gyre                        # spins the bundled model
-gyre model.fbx --blocks     # half-blocks, truecolour
-gyre model.stl --kitty      # real pixels, where the terminal supports them
+behold                        # spins the bundled model
+behold model.fbx --blocks     # half-blocks, truecolour
+behold model.stl --kitty      # real pixels, where the terminal supports them
 ```
 
 Loads `.obj`, `.stl` (binary + ASCII) and binary `.fbx`, then software-renders
@@ -21,18 +21,18 @@ your terminal at 15–30 fps.
 Needs **python3 and nothing else**. No numpy, no Pillow, no FBX SDK.
 
 ```sh
-curl -o ~/.local/bin/gyre https://raw.githubusercontent.com/mattpolicastro/gyre/main/gyre
-chmod +x ~/.local/bin/gyre
+curl -o ~/.local/bin/behold https://raw.githubusercontent.com/mattpolicastro/behold/main/behold
+chmod +x ~/.local/bin/behold
 
-# optional: the bundled model, so bare `gyre` has something to spin
-mkdir -p ~/.local/share/gyre
-curl -o ~/.local/share/gyre/spot.obj https://raw.githubusercontent.com/mattpolicastro/gyre/main/models/spot.obj
+# optional: the bundled model, so bare `behold` has something to spin
+mkdir -p ~/.local/share/behold
+curl -o ~/.local/share/behold/spot.obj https://raw.githubusercontent.com/mattpolicastro/behold/main/models/spot.obj
 ```
 
-Run with no arguments and `gyre` spins **Spot**, by [Keenan Crane][spot],
+Run with no arguments and `behold` spins **Spot**, by [Keenan Crane][spot],
 released into the public domain — see [`models/NOTICE.md`](models/NOTICE.md).
 It looks for the model next to the script (following symlinks) and then in
-`$XDG_DATA_HOME/gyre`, falling back to `--demo torus` if it finds neither.
+`$XDG_DATA_HOME/behold`, falling back to `--demo torus` if it finds neither.
 
 Otherwise pass a file — anything Blender exports will do.
 
@@ -87,11 +87,11 @@ Everything is stdlib, which forced a few things to be written out longhand:
   z-buffer sorts out occlusion, so any file renders correctly regardless of
   convention.
 - **Framing is measured, not bounded.** A bounding sphere is a terrible fit for
-  a flat model — it can waste 40% of the frame. Instead `gyre` sweeps a full
+  a flat model — it can waste 40% of the frame. Instead `behold` sweeps a full
   rotation at startup, finds the widest actual projection, and solves the focal
   length so that peak lands exactly at the frame edge. Fixed for the whole
   animation, so the model doesn't pulse as it turns.
-- **Real cell geometry.** Terminal cells aren't exactly 2:1. `gyre` asks via
+- **Real cell geometry.** Terminal cells aren't exactly 2:1. `behold` asks via
   `CSI 16 t` and uses the answer, falling back to the usual assumption if the
   terminal stays quiet. A ~6% aspect error is very visible on a spinning object.
 - **PNG encoder** for the Kitty path — about fifteen lines of `zlib`.
@@ -101,7 +101,7 @@ Everything is stdlib, which forced a few things to be written out longhand:
 
 - **Leaves your terminal alone.** The animation runs on the alternate screen
   buffer, so the terminal snapshots what you had and restores it exactly when
-  `gyre` exits — no clearing, no clobbered scrollback. Kitty image placements
+  `behold` exits — no clearing, no clobbered scrollback. Kitty image placements
   aren't part of that snapshot, so they're deleted explicitly first. Cleanup
   runs on SIGINT, SIGTERM and SIGHUP, and is flushed. `--keep` opts out and
   draws inline.
@@ -117,7 +117,7 @@ Terminal 3D is well-trodden — there are plenty of ASCII OBJ renderers, and
 want the best quality, rendering with a real engine and piping frames to one of
 those will beat this.
 
-`gyre`'s niche is narrow and deliberate: a single file you can `scp` anywhere
+`behold`'s niche is narrow and deliberate: a single file you can `scp` anywhere
 that already has python3, which takes a *mesh* rather than an image.
 
 [chafa]: https://hpjansson.org/chafa/

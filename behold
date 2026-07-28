@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""gyre -- spin a 3D model in the terminal.
+"""behold -- spin a 3D model in the terminal.
 
-"Turning and turning in the widening gyre."
-
-A small software rasteriser: perspective projection, backface culling,
-z-buffered barycentric triangle fill, Lambert + specular shading. Output is
-either real pixels via the Kitty graphics protocol (Ghostty, Kitty, WezTerm)
-or an ASCII ramp. Pure stdlib -- the PNG encoder is ~15 lines of zlib.
+A small software rasteriser: perspective projection, z-buffered barycentric
+triangle fill, two-sided Lambert + specular shading. Renders to a character
+ramp by default, or to half-blocks or real pixels via the kitty graphics
+protocol. Pure stdlib -- the PNG encoder is ~15 lines of zlib, and the binary
+FBX reader about eighty.
 """
 import argparse, base64, math, os, re, shutil, signal, struct, sys, time, zlib
 
@@ -180,6 +179,7 @@ def default_model():
     data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
     for c in (os.path.join(here, "models", "spot.obj"),
               os.path.join(here, "spot.obj"),
+              os.path.join(data, "behold", "spot.obj"),
               os.path.join(data, "gyre", "spot.obj")):
         if os.path.exists(c):
             return c
@@ -528,7 +528,7 @@ def main():
     if a.kitty and supports_kitty():
         a.mode = "kitty"
     elif a.kitty:
-        sys.stderr.write("gyre: terminal has no kitty graphics support, using blocks\n")
+        sys.stderr.write("behold: terminal has no kitty graphics support, using blocks\n")
         a.mode = "blocks"
     elif a.blocks:
         a.mode = "blocks"
@@ -539,7 +539,7 @@ def main():
         cw, ch = a.cell, a.cell * 2
     cols, rows, W, H, ay = viewport(a, cw, ch)
     use_kitty = a.mode == "kitty"
-    sys.stderr.write("gyre: %s, %d tris, %s, cell %dx%dpx, %dx%d cells, %dx%d samples\n"
+    sys.stderr.write("behold: %s, %d tris, %s, cell %dx%dpx, %dx%d cells, %dx%d samples\n"
                      % (label, len(faces), a.mode, cw, ch, cols, rows, W, H))
 
     focal = fit_focal(verts, W, H, ay, a.pitch, 3.2, 0.92 * a.zoom)
