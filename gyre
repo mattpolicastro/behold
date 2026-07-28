@@ -1,0 +1,544 @@
+#!/usr/bin/env python3
+"""gyre -- spin a 3D model in the terminal.
+
+"Turning and turning in the widening gyre."
+
+A small software rasteriser: perspective projection, backface culling,
+z-buffered barycentric triangle fill, Lambert + specular shading. Output is
+either real pixels via the Kitty graphics protocol (Ghostty, Kitty, WezTerm)
+or an ASCII ramp. Pure stdlib -- the PNG encoder is ~15 lines of zlib.
+"""
+import argparse, base64, math, os, re, shutil, struct, sys, time, zlib
+
+RAMP = " .:-=+*#%@"
+# curated 256-colour bronze -> gold, one step per ramp level, so the character
+# and its colour advance together (this is what dxspin used)
+GOLD = [58, 94, 130, 136, 172, 178, 214, 220, 221, 229]
+
+
+# --------------------------------------------------------------------- mesh
+def load_obj(path):
+    verts, norms, faces = [], [], []
+    for line in open(path):
+        if line.startswith("v "):
+            verts.append(tuple(map(float, line.split()[1:4])))
+        elif line.startswith("vn "):
+            norms.append(tuple(map(float, line.split()[1:4])))
+        elif line.startswith("f "):
+            idx = []
+            for tok in line.split()[1:]:
+                p = tok.split("/")
+                vi = int(p[0]); vi = vi - 1 if vi > 0 else len(verts) + vi
+                ni = None
+                if len(p) == 3 and p[2]:
+                    n = int(p[2]); ni = n - 1 if n > 0 else len(norms) + n
+                idx.append((vi, ni))
+            for k in range(1, len(idx) - 1):          # fan-triangulate
+                faces.append((idx[0], idx[k], idx[k + 1]))
+    return verts, norms, faces
+
+
+# ------------------------------------------------------- binary FBX reader
+class Node:
+    __slots__ = ("name", "props", "kids")
+
+    def __init__(self, name, props, kids):
+        self.name, self.props, self.kids = name, props, kids
+
+    def find(self, name):
+        return [k for k in self.kids if k.name == name]
+
+    def walk(self, name):
+        if self.name == name:
+            yield self
+        for k in self.kids:
+            yield from k.walk(name)
+
+
+def _prop(buf, o):
+    t = chr(buf[o]); o += 1
+    if t == "Y": return struct.unpack_from("<h", buf, o)[0], o + 2
+    if t == "C": return bool(buf[o]), o + 1
+    if t == "I": return struct.unpack_from("<i", buf, o)[0], o + 4
+    if t == "F": return struct.unpack_from("<f", buf, o)[0], o + 4
+    if t == "D": return struct.unpack_from("<d", buf, o)[0], o + 8
+    if t == "L": return struct.unpack_from("<q", buf, o)[0], o + 8
+    if t in "SR":
+        n = struct.unpack_from("<I", buf, o)[0]; o += 4
+        return buf[o:o + n], o + n
+    if t in "fdlib":
+        n, enc, clen = struct.unpack_from("<III", buf, o); o += 12
+        raw = buf[o:o + clen]; o += clen
+        if enc == 1:
+            raw = zlib.decompress(raw)
+        fmt = {"f": "f", "d": "d", "l": "q", "i": "i", "b": "b"}[t]
+        return list(struct.unpack("<%d%s" % (n, fmt), raw)), o
+    raise ValueError("unknown FBX property type %r" % t)
+
+
+def _record(buf, o, wide):
+    if wide:
+        end, nprops, plen = struct.unpack_from("<QQQ", buf, o); o += 24
+    else:
+        end, nprops, plen = struct.unpack_from("<III", buf, o); o += 12
+    nlen = buf[o]; o += 1
+    if end == 0:
+        return None, o
+    name = buf[o:o + nlen].decode("utf-8", "replace"); o += nlen
+    props = []
+    for _ in range(nprops):
+        v, o = _prop(buf, o)
+        props.append(v)
+    kids = []
+    while o < end:
+        k, o = _record(buf, o, wide)
+        if k is None:
+            break
+        kids.append(k)
+    return Node(name, props, kids), end
+
+
+def _fbx_parse(path):
+    buf = open(path, "rb").read()
+    if buf[:20] != b"Kaydara FBX Binary  ":
+        raise ValueError("not a binary FBX")
+    ver = struct.unpack_from("<I", buf, 23)[0]
+    wide = ver >= 7500
+    o, kids = 27, []
+    while o < len(buf) - 16:
+        n, o = _record(buf, o, wide)
+        if n is None:
+            break
+        kids.append(n)
+    return Node("root", [ver], kids)
+
+
+def _fbx_meshes(root):
+    """Yield (verts, faces) per Geometry node; polygons fan-triangulated."""
+    out = []
+    for g in root.walk("Geometry"):
+        vs = g.find("Vertices")
+        pi = g.find("PolygonVertexIndex")
+        if not vs or not pi:
+            continue
+        flat = vs[0].props[0]
+        verts = [(flat[i], flat[i+1], flat[i+2]) for i in range(0, len(flat), 3)]
+        idx, poly, faces = pi[0].props[0], [], []
+        for v in idx:
+            if v < 0:
+                poly.append(~v)
+                for k in range(1, len(poly) - 1):
+                    faces.append(((poly[0], None), (poly[k], None), (poly[k+1], None)))
+                poly = []
+            else:
+                poly.append(v)
+        out.append((verts, faces))
+    return out
+
+
+
+def load_fbx(path):
+    ms = _fbx_meshes(_fbx_parse(path))
+    if not ms:
+        raise ValueError("no Geometry in FBX")
+    verts, faces = [], []
+    for v, f in ms:                      # merge all meshes in the file
+        b = len(verts)
+        verts += v
+        faces += [((a[0]+b,None),(c[0]+b,None),(d[0]+b,None)) for a,c,d in f]
+    return verts, [], faces
+
+
+def load_stl(path):
+    data = open(path, "rb").read()
+    verts, faces = [], []
+    if data[:5] == b"solid" and b"facet" in data[:2048]:
+        cur = []
+        for line in data.decode("utf-8", "replace").splitlines():
+            t = line.split()
+            if len(t) == 4 and t[0] == "vertex":
+                cur.append(tuple(map(float, t[1:4])))
+                if len(cur) == 3:
+                    b = len(verts); verts += cur
+                    faces.append(((b,None),(b+1,None),(b+2,None)))
+                    cur = []
+        return verts, [], faces
+    n = struct.unpack("<I", data[80:84])[0]
+    for i in range(n):
+        o = 84 + i * 50 + 12
+        b = len(verts)
+        for k in range(3):
+            verts.append(struct.unpack("<3f", data[o + k*12:o + k*12 + 12]))
+        faces.append(((b,None),(b+1,None),(b+2,None)))
+    return verts, [], faces
+
+
+def load_mesh(path):
+    p = path.lower()
+    if p.endswith(".stl"): return load_stl(path)
+    if p.endswith(".fbx"): return load_fbx(path)
+    return load_obj(path)
+
+
+def demo_mesh(kind="torus", a=1.0, b=0.4, nu=44, nv=22):
+    verts, norms, faces = [], [], []
+    if kind == "cube":
+        for sx in (-1, 1):
+            for sy in (-1, 1):
+                for sz in (-1, 1):
+                    verts.append((sx * 0.6, sy * 0.6, sz * 0.6))
+        quads = [(0,1,3,2),(4,6,7,5),(0,4,5,1),(2,3,7,6),(0,2,6,4),(1,5,7,3)]
+        for q in quads:
+            faces.append(((q[0],None),(q[1],None),(q[2],None)))
+            faces.append(((q[0],None),(q[2],None),(q[3],None)))
+        return verts, norms, faces
+    for i in range(nu):
+        for j in range(nv):
+            u, v = 2 * math.pi * i / nu, 2 * math.pi * j / nv
+            cu, su, cv, sv = math.cos(u), math.sin(u), math.cos(v), math.sin(v)
+            verts.append(((a + b * cv) * cu, b * sv, (a + b * cv) * su))
+            norms.append((cv * cu, sv, cv * su))
+    for i in range(nu):
+        for j in range(nv):
+            p = lambda di, dj: ((i + di) % nu) * nv + (j + dj) % nv
+            q = [p(0,0), p(1,0), p(1,1), p(0,1)]
+            faces.append(((q[0],q[0]),(q[1],q[1]),(q[2],q[2])))
+            faces.append(((q[0],q[0]),(q[2],q[2]),(q[3],q[3])))
+    return verts, norms, faces
+
+
+def normalise(verts):
+    xs = [v[0] for v in verts]; ys = [v[1] for v in verts]; zs = [v[2] for v in verts]
+    cx, cy, cz = ((min(a) + max(a)) / 2 for a in (xs, ys, zs))
+    # bounding sphere: the only radius invariant under arbitrary rotation
+    r = max(math.dist(v, (cx, cy, cz)) for v in verts) or 1.0
+    return [((x - cx) / r, (y - cy) / r, (z - cz) / r) for x, y, z in verts]
+
+
+# ----------------------------------------------------------------- renderer
+def fit_focal(verts, W, H, ay, pitch, dist, fill, steps=64):
+    """Focal length that makes the widest projection over a full turn land
+    exactly at `fill` of the frame. Measured, not bounded -- a bounding sphere
+    is far too conservative for flat models like a logo plate."""
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    worst = 1e-9
+    for i in range(steps):
+        ca, sa = math.cos(2 * math.pi * i / steps), math.sin(2 * math.pi * i / steps)
+        for x, y, z in verts:
+            rx = x * ca + z * sa
+            rz = -x * sa + z * ca
+            ry = y * cp - rz * sp
+            d = max(0.05, dist - (y * sp + rz * cp))
+            worst = max(worst, abs(rx / d) / (W / 2), abs(ry / d) / (H / ay / 2))
+    return fill / worst
+
+
+def render(verts, norms, faces, W, H, yaw, pitch, rgb, dist=3.2, fill=0.92,
+           ay=1.0, focal=None, spec=True):
+    cy_, sy_ = math.cos(yaw), math.sin(yaw)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+
+    def xform(p):
+        x, y, z = p
+        x, z = x * cy_ + z * sy_, -x * sy_ + z * cy_
+        y, z = y * cp - z * sp, y * sp + z * cp
+        return x, y, z
+
+    # ay: vertical size of one sample. Kitty pixels and half-block cells are
+    # square (1.0); a whole character cell is ~2:1 (0.5). Solve the focal
+    # length from the fill target rather than a fov, so the model actually
+    # fills the frame at the chosen camera distance.
+    f = focal if focal is not None else fill * min(W, H / ay) / 2 * (dist - 1.0)
+    proj, view = [], []
+    for v in verts:
+        x, y, z = xform(v)
+        view.append((x, y, z))
+        d = dist - z
+        if d < 0.05:
+            d = 0.05
+        proj.append((W / 2 + f * x / d, H / 2 - f * y / d * ay, z))
+    tn = [xform(n) for n in norms] if norms else []
+
+    zbuf = [-1e18] * (W * H)
+    fb = bytearray(W * H * 3) if rgb else None
+    sh = [0.0] * (W * H)
+    lx, ly, lz = -0.40, 0.62, 0.68
+
+    for tri in faces:
+        (ia, na), (ib, nb), (ic, nc) = tri
+        ax, ay, az = proj[ia]; bx, by, bz = proj[ib]; cx2, cy2, cz2 = proj[ic]
+        area = (bx - ax) * (cy2 - ay) - (by - ay) * (cx2 - ax)
+        if -1e-9 < area < 1e-9:               # degenerate only; winding is not
+            continue                          # trusted, so nothing is culled
+        x0 = max(0, int(min(ax, bx, cx2))); x1 = min(W - 1, int(max(ax, bx, cx2)) + 1)
+        y0 = max(0, int(min(ay, by, cy2))); y1 = min(H - 1, int(max(ay, by, cy2)) + 1)
+        if x0 > x1 or y0 > y1:
+            continue
+        if tn and na is not None:
+            n0, n1, n2 = tn[na], tn[nb], tn[nc]
+        else:                                  # flat normal from the geometry
+            ux, uy, uz = (verts[ib][0]-verts[ia][0], verts[ib][1]-verts[ia][1], verts[ib][2]-verts[ia][2])
+            vx, vy, vz = (verts[ic][0]-verts[ia][0], verts[ic][1]-verts[ia][1], verts[ic][2]-verts[ia][2])
+            fn = xform((vy*uz-vz*uy, vz*ux-vx*uz, vx*uy-vy*ux))
+            m = math.sqrt(sum(c*c for c in fn)) or 1.0
+            fn = tuple(c/m for c in fn)
+            n0 = n1 = n2 = fn
+        inv = 1.0 / area
+        for py in range(y0, y1 + 1):
+            for px in range(x0, x1 + 1):
+                w0 = ((bx-ax)*(py+0.5-ay) - (by-ay)*(px+0.5-ax)) * inv
+                w1 = ((cx2-bx)*(py+0.5-by) - (cy2-by)*(px+0.5-bx)) * inv
+                w2 = 1.0 - w0 - w1
+                if (w0 < 0 or w1 < 0 or w2 < 0) and (w0 > 0 or w1 > 0 or w2 > 0):
+                    continue                  # inside test, either winding
+                z = w1 * az + w2 * bz + w0 * cz2
+                i = py * W + px
+                if z <= zbuf[i]:
+                    continue
+                zbuf[i] = z
+                nx = w1*n0[0] + w2*n1[0] + w0*n2[0]
+                ny = w1*n0[1] + w2*n1[1] + w0*n2[1]
+                nz = w1*n0[2] + w2*n1[2] + w0*n2[2]
+                m = math.sqrt(nx*nx + ny*ny + nz*nz) or 1.0
+                nx, ny, nz = nx/m, ny/m, nz/m
+                if nz < 0.0:            # two-sided: meshes disagree on winding
+                    nx, ny, nz = -nx, -ny, -nz
+                lam = max(0.0, nx*lx + ny*ly + nz*lz)
+                if spec:
+                    sh[i] = 0.13 + 0.72 * lam + 0.5 * lam ** 18
+                else:
+                    sh[i] = 0.18 + 0.82 * lam
+    if rgb:
+        for i, s in enumerate(sh):
+            if s <= 0:
+                continue
+            s = min(1.0, s)
+            fb[i*3] = min(255, int(255 * s))
+            fb[i*3+1] = min(255, int(205 * s))
+            fb[i*3+2] = min(255, int(90 * s ** 1.4))
+        return bytes(fb)
+    return sh
+
+
+# ------------------------------------------------------------------- output
+def write_png(W, H, rgb):
+    raw = b"".join(b"\x00" + rgb[y*W*3:(y+1)*W*3] for y in range(H))
+    def chunk(t, d):
+        c = t + d
+        return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def kitty(png, cols, rows, place=True):
+    b = base64.b64encode(png).decode()
+    parts, n = [], 3072
+    ch = [b[i:i+n] for i in range(0, len(b), n)] or [""]
+    for k, c in enumerate(ch):
+        first, last = k == 0, k == len(ch) - 1
+        if first:
+            parts.append("\033_Ga=T,f=100,q=2,c=%d,r=%d,m=%d;%s\033\\"
+                         % (cols, rows, 0 if last else 1, c))
+        else:
+            parts.append("\033_Gm=%d;%s\033\\" % (0 if last else 1, c))
+    return "".join(parts)
+
+
+def shade_rgb(v):
+    v = min(1.0, v)
+    return (min(255, int(255 * v)), min(255, int(205 * v)),
+            min(255, int(90 * v ** 1.4)))
+
+
+def half_frame(sh, W, H):
+    """Half-block cells: 2x vertical resolution, truecolour, and the terminal
+    background left untouched wherever the model isn't."""
+    out = []
+    for r in range(H // 2):
+        line, cf, cb = [], None, None
+        for c in range(W):
+            t, b = sh[(r * 2) * W + c], sh[(r * 2 + 1) * W + c]
+            if t <= 0 and b <= 0:
+                if cf is not None or cb is not None:
+                    line.append("\033[0m"); cf = cb = None
+                line.append(" ")
+                continue
+            if t > 0 and b > 0:
+                fg, bg, ch = shade_rgb(t), shade_rgb(b), "\u2580"
+            elif t > 0:
+                fg, bg, ch = shade_rgb(t), None, "\u2580"
+            else:
+                fg, bg, ch = shade_rgb(b), None, "\u2584"
+            if fg != cf:
+                line.append("\033[38;2;%d;%d;%dm" % fg); cf = fg
+            if bg != cb:
+                line.append("\033[48;2;%d;%d;%dm" % bg if bg else "\033[49m")
+                cb = bg
+            line.append(ch)
+        line.append("\033[0m")
+        out.append("".join(line))
+    return "\n".join(out)
+
+
+def ascii_frame(sh, W, H, color=True, truecolor=False):
+    out = []
+    for y in range(H):
+        row = sh[y*W:(y+1)*W]
+        line, cur = [], None
+        for v in row:
+            if v <= 0:
+                if cur is not None:
+                    line.append("\033[0m"); cur = None
+                line.append(" ")
+                continue
+            lvl = min(len(RAMP) - 1, int(min(1.0, v) * len(RAMP)))
+            ch = RAMP[lvl]
+            if color:
+                c = shade_rgb(v) if truecolor else GOLD[lvl]
+                if c != cur:
+                    line.append(("\033[38;2;%d;%d;%dm" % c) if truecolor
+                                else ("\033[38;5;%dm" % c))
+                    cur = c
+            line.append(ch)
+        out.append("".join(line) + ("\033[0m" if cur else ""))
+    return "\n".join(out)
+
+
+def cell_pixels(fd=1, timeout=0.12):
+    """Ask the terminal for its cell size in pixels (CSI 16 t -> CSI 6;h;w t).
+
+    Gives the true cell aspect instead of assuming exactly 2:1, and lets the
+    kitty path render at genuine 1:1 pixels. Returns None if unsupported.
+    """
+    if not os.isatty(fd):
+        return None
+    try:
+        import termios, tty, select
+    except ImportError:
+        return None
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        os.write(fd, b"\033[16t")
+        buf = b""
+        while select.select([fd], [], [], timeout)[0]:
+            buf += os.read(fd, 64)
+            if buf.endswith(b"t"):
+                break
+        m = re.search(rb"\033\[6;(\d+);(\d+)t", buf)
+        if m:
+            h, w = int(m.group(1)), int(m.group(2))
+            if 2 <= w <= 64 and 2 <= h <= 128:
+                return w, h
+    except Exception:
+        return None
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        except Exception:
+            pass
+    return None
+
+
+def viewport(a, cw, ch):
+    """Cells, sample grid and vertical sample scale for the current window."""
+    term = shutil.get_terminal_size((80, 24))
+    cols = a.cols or max(16, term.columns - 2)
+    rows = a.rows or max(8, term.lines - 3)
+    if a.kitty_mode:
+        # true 1:1 pixels, then scale down if that blows the sample budget
+        W, H = cols * cw, rows * ch
+        budget = a.budget
+        if W * H > budget:
+            k = math.sqrt(budget / (W * H))
+            W, H = max(16, int(W * k)), max(16, int(H * k))
+        return cols, rows, W, H, 1.0
+    if a.ascii:
+        return cols, rows, cols, rows, cw / ch
+    return cols, rows, cols, rows * 2, 2.0 * cw / ch
+
+
+def supports_kitty():
+    return (os.environ.get("TERM_PROGRAM") in ("ghostty", "WezTerm")
+            or "kitty" in os.environ.get("TERM", "")
+            or "ghostty" in os.environ.get("TERM", "")
+            or bool(os.environ.get("KITTY_WINDOW_ID")))
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("obj", nargs="?", help="path to a .obj, .stl or .fbx file")
+    p.add_argument("--demo", default="torus", choices=["torus", "cube"])
+    p.add_argument("--cols", type=int, default=0)
+    p.add_argument("--rows", type=int, default=0)
+    p.add_argument("--cell", type=int, default=0,
+                   help="pixels per cell width (0 = ask the terminal)")
+    p.add_argument("--budget", type=int, default=260000,
+                   help="max samples per frame; caps cost on big windows")
+    p.add_argument("--fps", type=float, default=20)
+    p.add_argument("--speed", type=float, default=1.0)
+    p.add_argument("--pitch", type=float, default=0.45)
+    p.add_argument("--duration", type=float, default=0)
+    p.add_argument("--ascii", action="store_true", help="ASCII ramp instead of half-blocks")
+    p.add_argument("--blocks", action="store_true", help="half-blocks even where kitty works")
+    p.add_argument("--mono", action="store_true", help="no colour")
+    p.add_argument("--zoom", type=float, default=1.0, help="scale factor (default 1)")
+    p.add_argument("--truecolor", action="store_true",
+                   help="smooth 24-bit gold in --ascii instead of the 256-colour ramp")
+    p.add_argument("--spec", action="store_true", help="specular highlight in --ascii")
+    p.add_argument("--still", type=float)
+    a = p.parse_args()
+
+    if a.obj:
+        verts, norms, faces = load_mesh(a.obj)
+    else:
+        verts, norms, faces = demo_mesh(a.demo)
+    verts = normalise(verts)
+
+    a.kitty_mode = supports_kitty() and not a.ascii and not a.blocks
+    cw, ch = cell_pixels() or (a.cell or 8, (a.cell or 8) * 2)
+    if a.cell:
+        cw, ch = a.cell, a.cell * 2
+    cols, rows, W, H, ay = viewport(a, cw, ch)
+    use_kitty = a.kitty_mode
+    mode = "kitty" if use_kitty else ("ascii" if a.ascii else "half-blocks")
+    sys.stderr.write("gyre: %d tris, %s, cell %dx%dpx, %dx%d cells, %dx%d samples\n"
+                     % (len(faces), mode, cw, ch, cols, rows, W, H))
+
+    focal = fit_focal(verts, W, H, ay, a.pitch, 3.2, 0.92 * a.zoom)
+
+    def draw(ang):
+        out = render(verts, norms, faces, W, H, ang, a.pitch, use_kitty,
+                     ay=ay, focal=focal, spec=a.spec or not a.ascii)
+        if use_kitty:
+            return kitty(write_png(W, H, out), cols, rows)
+        return ascii_frame(out, W, H, not a.mono, a.truecolor) if a.ascii \
+            else half_frame(out, W, H)
+
+    if a.still is not None:
+        sys.stdout.write(draw(a.still) + "\n")
+        return
+    sys.stdout.write("\033[?25l")
+    t0 = time.time()
+    try:
+        while True:
+            t = time.time() - t0
+            if a.duration and t > a.duration:
+                break
+            nc, nr, nW, nH, nay = viewport(a, cw, ch)
+            if (nW, nH, nay) != (W, H, ay):
+                cols, rows, W, H, ay = nc, nr, nW, nH, nay
+                focal = fit_focal(verts, W, H, ay, a.pitch, 3.2, 0.92 * a.zoom)
+                sys.stdout.write("\033[2J")
+            sys.stdout.write("\033[H" + draw(t * a.speed))
+            sys.stdout.flush()
+            time.sleep(max(0.0, 1 / a.fps - (time.time() - t0 - t)))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write("\033[?25h\n")
+
+
+if __name__ == "__main__":
+    main()
