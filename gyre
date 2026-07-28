@@ -8,7 +8,7 @@ z-buffered barycentric triangle fill, Lambert + specular shading. Output is
 either real pixels via the Kitty graphics protocol (Ghostty, Kitty, WezTerm)
 or an ASCII ramp. Pure stdlib -- the PNG encoder is ~15 lines of zlib.
 """
-import argparse, base64, math, os, re, shutil, struct, sys, time, zlib
+import argparse, base64, math, os, re, shutil, signal, struct, sys, time, zlib
 
 RAMP = " .:-=+*#%@"
 # curated 256-colour bronze -> gold, one step per ramp level, so the character
@@ -273,7 +273,7 @@ def render(verts, norms, faces, W, H, yaw, pitch, rgb, dist=3.2, fill=0.92,
     tn = [xform(n) for n in norms] if norms else []
 
     zbuf = [-1e18] * (W * H)
-    fb = bytearray(W * H * 3) if rgb else None
+    fb = bytearray(W * H * 4) if rgb else None   # zeroed = transparent
     sh = [0.0] * (W * H)
     lx, ly, lz = -0.40, 0.62, 0.68
 
@@ -326,22 +326,28 @@ def render(verts, norms, faces, W, H, yaw, pitch, rgb, dist=3.2, fill=0.92,
             if s <= 0:
                 continue
             s = min(1.0, s)
-            fb[i*3] = min(255, int(255 * s))
-            fb[i*3+1] = min(255, int(205 * s))
-            fb[i*3+2] = min(255, int(90 * s ** 1.4))
+            fb[i*4] = min(255, int(255 * s))
+            fb[i*4+1] = min(255, int(205 * s))
+            fb[i*4+2] = min(255, int(90 * s ** 1.4))
+            fb[i*4+3] = 255
         return bytes(fb)
     return sh
 
 
 # ------------------------------------------------------------------- output
-def write_png(W, H, rgb):
-    raw = b"".join(b"\x00" + rgb[y*W*3:(y+1)*W*3] for y in range(H))
+def write_png(W, H, rgba):
+    """8-bit RGBA PNG (colour type 6) -- the alpha is the point: it lets the
+    terminal composite the model over whatever is already on screen."""
+    raw = b"".join(b"\x00" + rgba[y*W*4:(y+1)*W*4] for y in range(H))
     def chunk(t, d):
         c = t + d
         return struct.pack(">I", len(d)) + c + struct.pack(">I", zlib.crc32(c) & 0xffffffff)
     return (b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 2, 0, 0, 0))
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", W, H, 8, 6, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+KITTY_CLEAR = "\033_Ga=d,d=A,q=2\033\\"      # delete all placements
 
 
 def kitty(png, cols, rows, place=True):
@@ -355,7 +361,7 @@ def kitty(png, cols, rows, place=True):
                          % (cols, rows, 0 if last else 1, c))
         else:
             parts.append("\033_Gm=%d;%s\033\\" % (0 if last else 1, c))
-    return "".join(parts)
+    return KITTY_CLEAR + "".join(parts)
 
 
 def shade_rgb(v):
@@ -497,6 +503,8 @@ def main():
     p.add_argument("--ascii", action="store_true", help="ASCII ramp instead of half-blocks")
     p.add_argument("--blocks", action="store_true", help="half-blocks even where kitty works")
     p.add_argument("--mono", action="store_true", help="no colour")
+    p.add_argument("--keep", action="store_true",
+                   help="leave the last frame on screen instead of clearing")
     p.add_argument("--zoom", type=float, default=1.0, help="scale factor (default 1)")
     p.add_argument("--truecolor", action="store_true",
                    help="smooth 24-bit gold in --ascii instead of the 256-colour ramp")
@@ -536,6 +544,16 @@ def main():
     if a.still is not None:
         sys.stdout.write(draw(a.still) + "\n")
         return
+    # SIGTERM/SIGHUP (kill, closed pane) would otherwise skip the cleanup and
+    # leave a stuck image behind, same as an unflushed Ctrl-C did.
+    def _bail(signum, frame):
+        raise KeyboardInterrupt
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _bail)
+        except (ValueError, OSError):
+            pass
+
     sys.stdout.write("\033[?25l")
     t0 = time.time()
     try:
@@ -554,7 +572,17 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        sys.stdout.write("\033[?25h\n")
+        # Leave nothing behind: drop any placed images, wipe the frames we
+        # drew over, restore the cursor -- and flush, or none of it lands.
+        if use_kitty:
+            sys.stdout.write(KITTY_CLEAR)
+        if not a.keep:
+            sys.stdout.write("\033[2J\033[H")
+        sys.stdout.write("\033[?25h")
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
