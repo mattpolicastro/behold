@@ -465,15 +465,14 @@ def viewport(a, cw, ch):
     term = shutil.get_terminal_size((80, 24))
     cols = a.cols or max(16, term.columns - 2)
     rows = a.rows or max(8, term.lines - 3)
-    if a.kitty_mode:
+    if a.mode == "kitty":
         # true 1:1 pixels, then scale down if that blows the sample budget
         W, H = cols * cw, rows * ch
-        budget = a.budget
-        if W * H > budget:
-            k = math.sqrt(budget / (W * H))
+        if W * H > a.budget:
+            k = math.sqrt(a.budget / (W * H))
             W, H = max(16, int(W * k)), max(16, int(H * k))
         return cols, rows, W, H, 1.0
-    if a.ascii:
+    if a.mode == "ascii":
         return cols, rows, cols, rows, cw / ch
     return cols, rows, cols, rows * 2, 2.0 * cw / ch
 
@@ -500,8 +499,12 @@ def main():
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--pitch", type=float, default=0.45)
     p.add_argument("--duration", type=float, default=0)
-    p.add_argument("--ascii", action="store_true", help="ASCII ramp instead of half-blocks")
-    p.add_argument("--blocks", action="store_true", help="half-blocks even where kitty works")
+    p.add_argument("--ascii", action="store_true",
+                   help="character ramp (the default)")
+    p.add_argument("--blocks", action="store_true",
+                   help="half-blocks: truecolour, 2x vertical resolution")
+    p.add_argument("--kitty", action="store_true",
+                   help="inline pixels via the kitty graphics protocol")
     p.add_argument("--mono", action="store_true", help="no colour")
     p.add_argument("--keep", action="store_true",
                    help="draw inline and leave the last frame, instead of using "
@@ -522,25 +525,33 @@ def main():
         label = "demo:" + (a.demo or "torus")
     verts = normalise(verts)
 
-    a.kitty_mode = supports_kitty() and not a.ascii and not a.blocks
+    if a.kitty and supports_kitty():
+        a.mode = "kitty"
+    elif a.kitty:
+        sys.stderr.write("gyre: terminal has no kitty graphics support, using blocks\n")
+        a.mode = "blocks"
+    elif a.blocks:
+        a.mode = "blocks"
+    else:
+        a.mode = "ascii"
     cw, ch = cell_pixels() or (a.cell or 8, (a.cell or 8) * 2)
     if a.cell:
         cw, ch = a.cell, a.cell * 2
     cols, rows, W, H, ay = viewport(a, cw, ch)
-    use_kitty = a.kitty_mode
-    mode = "kitty" if use_kitty else ("ascii" if a.ascii else "half-blocks")
+    use_kitty = a.mode == "kitty"
     sys.stderr.write("gyre: %s, %d tris, %s, cell %dx%dpx, %dx%d cells, %dx%d samples\n"
-                     % (label, len(faces), mode, cw, ch, cols, rows, W, H))
+                     % (label, len(faces), a.mode, cw, ch, cols, rows, W, H))
 
     focal = fit_focal(verts, W, H, ay, a.pitch, 3.2, 0.92 * a.zoom)
 
     def draw(ang):
         out = render(verts, norms, faces, W, H, ang, a.pitch, use_kitty,
-                     ay=ay, focal=focal, spec=a.spec or not a.ascii)
+                     ay=ay, focal=focal, spec=a.spec or a.mode != "ascii")
         if use_kitty:
             return kitty(write_png(W, H, out), cols, rows)
-        return ascii_frame(out, W, H, not a.mono, a.truecolor) if a.ascii \
-            else half_frame(out, W, H)
+        if a.mode == "ascii":
+            return ascii_frame(out, W, H, not a.mono, a.truecolor)
+        return half_frame(out, W, H)
 
     if a.still is not None:
         sys.stdout.write(draw(a.still) + "\n")

@@ -4,10 +4,12 @@ Spin a 3D model in your terminal. One file, no dependencies.
 
 > Turning and turning in the widening gyre…
 
+![Spot spinning in gyre's character mode](docs/spot-ascii.gif)
+
 ```sh
 gyre                        # spins the bundled model
-gyre model.fbx --blocks     # half-blocks, truecolour, transparent background
-gyre model.stl --ascii      # character ramp, 256-colour
+gyre model.fbx --blocks     # half-blocks, truecolour
+gyre model.stl --kitty      # real pixels, where the terminal supports them
 ```
 
 Loads `.obj`, `.stl` (binary + ASCII) and binary `.fbx`, then software-renders
@@ -38,13 +40,13 @@ Otherwise pass a file — anything Blender exports will do.
 
 ## Output modes
 
-`gyre` picks the best mode your terminal supports, and you can force any of them.
+Characters by default, because that's the point. The other two are opt-in.
 
 | mode | flag | what you get |
 |---|---|---|
-| Kitty graphics | *(default where supported)* | real pixels — Ghostty, Kitty, WezTerm |
+| Character ramp | *(default)* | ` .:-=+*#%@` in a 256-colour bronze→gold palette |
 | Half-blocks | `--blocks` | `▀`/`▄` cells, 24-bit colour, 2× vertical resolution, terminal background shows through |
-| Character ramp | `--ascii` | ` .:-=+*#%@` in a 256-colour bronze→gold palette |
+| Kitty graphics | `--kitty` | real pixels — Ghostty, Kitty, WezTerm; falls back to blocks elsewhere |
 
 Half-block mode leaves the background *unset* rather than painting it black, so
 it composites over whatever your terminal background is — it looks native rather
@@ -62,11 +64,13 @@ than like a pasted-in rectangle.
 --cols / --rows  override the auto-detected viewport
 --cell N         pixels per cell (default: ask the terminal)
 --budget N       max samples/frame; caps cost on big windows (default 260000)
---truecolor      smooth 24-bit gold in --ascii instead of the stepped palette
---spec           specular highlight in --ascii
+--truecolor      smooth 24-bit gold instead of the stepped palette
+--spec           specular highlight in character mode
 --mono           no colour
 --keep           draw inline and leave the last frame on screen
 --demo torus|cube   built-in mesh instead of the bundled model
+
+The GIF above was made with `docs/make-gif.py` (needs Pillow).
 ```
 
 ## How it works
