@@ -18,7 +18,16 @@ your terminal at 15–30 fps.
 
 ## Install
 
-Needs **python3 and nothing else**. No numpy, no Pillow, no FBX SDK.
+```sh
+brew tap mattpolicastro/tap
+brew install behold
+```
+
+Homebrew 6 asks you to trust third-party taps — `brew trust mattpolicastro/tap`
+if prompted.
+
+Or just drop the script on your PATH. It needs **python3 and nothing else** —
+no numpy, no Pillow, no FBX SDK:
 
 ```sh
 curl -o ~/.local/bin/behold https://raw.githubusercontent.com/mattpolicastro/behold/main/behold
@@ -33,8 +42,11 @@ Run with no arguments and `behold` spins **Spot**, by [Keenan Crane][spot],
 released into the public domain — see [`models/NOTICE.md`](models/NOTICE.md).
 It looks for the model next to the script (following symlinks) and then in
 `$XDG_DATA_HOME/behold`, falling back to `--demo torus` if it finds neither.
+The Homebrew install bundles it.
 
 Otherwise pass a file — anything Blender exports will do.
+
+There's also `--demo torus` and `--demo cube`, which need no file at all.
 
 [spot]: https://www.cs.cmu.edu/~kmcrane/Projects/ModelRepository/
 
