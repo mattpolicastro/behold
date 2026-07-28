@@ -65,6 +65,7 @@ than like a pasted-in rectangle.
 --truecolor      smooth 24-bit gold in --ascii instead of the stepped palette
 --spec           specular highlight in --ascii
 --mono           no colour
+--keep           draw inline and leave the last frame on screen
 --demo torus|cube   built-in mesh instead of the bundled model
 ```
 
@@ -93,6 +94,13 @@ Everything is stdlib, which forced a few things to be written out longhand:
 - **FBX reader.** Binary FBX is a tree of length-prefixed records with
   zlib-deflated array properties, and polygons mark their last vertex by
   bitwise-NOT. Roughly eighty lines, no SDK.
+
+- **Leaves your terminal alone.** The animation runs on the alternate screen
+  buffer, so the terminal snapshots what you had and restores it exactly when
+  `gyre` exits — no clearing, no clobbered scrollback. Kitty image placements
+  aren't part of that snapshot, so they're deleted explicitly first. Cleanup
+  runs on SIGINT, SIGTERM and SIGHUP, and is flushed. `--keep` opts out and
+  draws inline.
 
 On a large window the Kitty path renders at true 1:1 pixels until that exceeds
 the sample budget, then it renders smaller and lets the terminal scale it up —

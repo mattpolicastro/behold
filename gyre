@@ -504,7 +504,8 @@ def main():
     p.add_argument("--blocks", action="store_true", help="half-blocks even where kitty works")
     p.add_argument("--mono", action="store_true", help="no colour")
     p.add_argument("--keep", action="store_true",
-                   help="leave the last frame on screen instead of clearing")
+                   help="draw inline and leave the last frame, instead of using "
+                        "the alternate screen")
     p.add_argument("--zoom", type=float, default=1.0, help="scale factor (default 1)")
     p.add_argument("--truecolor", action="store_true",
                    help="smooth 24-bit gold in --ascii instead of the 256-colour ramp")
@@ -554,6 +555,12 @@ def main():
         except (ValueError, OSError):
             pass
 
+    # Alternate screen: the terminal snapshots the current screen on entry and
+    # restores it exactly on exit, so the animation never touches the caller's
+    # scrollback or prompt. --keep draws inline instead and leaves the frame.
+    alt = not a.keep
+    if alt:
+        sys.stdout.write("\033[?1049h")
     sys.stdout.write("\033[?25l")
     t0 = time.time()
     try:
@@ -572,13 +579,13 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        # Leave nothing behind: drop any placed images, wipe the frames we
-        # drew over, restore the cursor -- and flush, or none of it lands.
+        # Drop any placed images first (they are not part of the screen
+        # snapshot), then hand the original screen back untouched.
         if use_kitty:
             sys.stdout.write(KITTY_CLEAR)
-        if not a.keep:
-            sys.stdout.write("\033[2J\033[H")
         sys.stdout.write("\033[?25h")
+        if alt:
+            sys.stdout.write("\033[?1049l")
         try:
             sys.stdout.flush()
         except Exception:
