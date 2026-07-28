@@ -5,9 +5,9 @@ Spin a 3D model in your terminal. One file, no dependencies.
 > Turning and turning in the widening gyre…
 
 ```sh
-gyre models/spot.obj              # inline pixels if your terminal supports them
-gyre models/spot.obj --blocks     # half-blocks, truecolour, transparent background
-gyre models/spot.obj --ascii      # character ramp, 256-colour
+gyre                        # spins the bundled model
+gyre model.fbx --blocks     # half-blocks, truecolour, transparent background
+gyre model.stl --ascii      # character ramp, 256-colour
 ```
 
 Loads `.obj`, `.stl` (binary + ASCII) and binary `.fbx`, then software-renders
@@ -21,14 +21,18 @@ Needs **python3 and nothing else**. No numpy, no Pillow, no FBX SDK.
 ```sh
 curl -o ~/.local/bin/gyre https://raw.githubusercontent.com/mattpolicastro/gyre/main/gyre
 chmod +x ~/.local/bin/gyre
+
+# optional: the bundled model, so bare `gyre` has something to spin
+mkdir -p ~/.local/share/gyre
+curl -o ~/.local/share/gyre/spot.obj https://raw.githubusercontent.com/mattpolicastro/gyre/main/models/spot.obj
 ```
 
-A model is bundled so there's something to spin immediately: **Spot**, by
-[Keenan Crane][spot], released into the public domain. See
-[`models/NOTICE.md`](models/NOTICE.md). Otherwise bring your own — anything
-Blender exports will do.
+Run with no arguments and `gyre` spins **Spot**, by [Keenan Crane][spot],
+released into the public domain — see [`models/NOTICE.md`](models/NOTICE.md).
+It looks for the model next to the script (following symlinks) and then in
+`$XDG_DATA_HOME/gyre`, falling back to `--demo torus` if it finds neither.
 
-There's also `--demo torus` and `--demo cube`, which need no file at all.
+Otherwise pass a file — anything Blender exports will do.
 
 [spot]: https://www.cs.cmu.edu/~kmcrane/Projects/ModelRepository/
 
@@ -61,7 +65,7 @@ than like a pasted-in rectangle.
 --truecolor      smooth 24-bit gold in --ascii instead of the stepped palette
 --spec           specular highlight in --ascii
 --mono           no colour
---demo torus|cube   built-in mesh, no file needed
+--demo torus|cube   built-in mesh instead of the bundled model
 ```
 
 ## How it works

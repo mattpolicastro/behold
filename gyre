@@ -173,6 +173,19 @@ def load_stl(path):
     return verts, [], faces
 
 
+def default_model():
+    """Bundled Spot, if we can find it: next to the script (repo checkout or
+    symlink target), then the usual data dirs for a curl-installed script."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    for c in (os.path.join(here, "models", "spot.obj"),
+              os.path.join(here, "spot.obj"),
+              os.path.join(data, "gyre", "spot.obj")):
+        if os.path.exists(c):
+            return c
+    return None
+
+
 def load_mesh(path):
     p = path.lower()
     if p.endswith(".stl"): return load_stl(path)
@@ -469,7 +482,8 @@ def supports_kitty():
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("obj", nargs="?", help="path to a .obj, .stl or .fbx file")
-    p.add_argument("--demo", default="torus", choices=["torus", "cube"])
+    p.add_argument("--demo", choices=["torus", "cube"],
+                   help="built-in mesh instead of a file")
     p.add_argument("--cols", type=int, default=0)
     p.add_argument("--rows", type=int, default=0)
     p.add_argument("--cell", type=int, default=0,
@@ -490,10 +504,13 @@ def main():
     p.add_argument("--still", type=float)
     a = p.parse_args()
 
-    if a.obj:
-        verts, norms, faces = load_mesh(a.obj)
+    src = a.obj or (None if a.demo else default_model())
+    if src:
+        verts, norms, faces = load_mesh(src)
+        label = os.path.basename(src)
     else:
-        verts, norms, faces = demo_mesh(a.demo)
+        verts, norms, faces = demo_mesh(a.demo or "torus")
+        label = "demo:" + (a.demo or "torus")
     verts = normalise(verts)
 
     a.kitty_mode = supports_kitty() and not a.ascii and not a.blocks
@@ -503,8 +520,8 @@ def main():
     cols, rows, W, H, ay = viewport(a, cw, ch)
     use_kitty = a.kitty_mode
     mode = "kitty" if use_kitty else ("ascii" if a.ascii else "half-blocks")
-    sys.stderr.write("gyre: %d tris, %s, cell %dx%dpx, %dx%d cells, %dx%d samples\n"
-                     % (len(faces), mode, cw, ch, cols, rows, W, H))
+    sys.stderr.write("gyre: %s, %d tris, %s, cell %dx%dpx, %dx%d cells, %dx%d samples\n"
+                     % (label, len(faces), mode, cw, ch, cols, rows, W, H))
 
     focal = fit_focal(verts, W, H, ay, a.pitch, 3.2, 0.92 * a.zoom)
 
